@@ -26,6 +26,9 @@ OutageX is a full-stack DevOps platform that automatically detects, analyzes, an
 ### Incident Details
 ![Incident Details](./screenshots/incidents.png)
 
+### PR
+![PR](./screenshots/pr.png)
+
 ---
 
 ## ✨ Features
