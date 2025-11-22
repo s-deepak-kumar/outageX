@@ -117,13 +117,11 @@ export class WebSocketHandlers {
 
     try {
       // Get context from orchestrator
-      const context = {
-        message: 'Incident response context',
-        // Add relevant context here
-      };
+      const context = 'Incident response context';
 
       // Generate response with Groq
-      const response = await groqClient.generateChatResponse(data.message, context);
+      const userMessage = typeof data.message === 'string' ? data.message : JSON.stringify(data.message);
+      const response = await groqClient.generateChatResponse(userMessage, context);
 
       socket.emit('chat:message', {
         message: {

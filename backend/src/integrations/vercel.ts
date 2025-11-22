@@ -171,7 +171,7 @@ export class VercelIntegration {
    * 
    * This method will return an empty array. Use Log Drains instead.
    */
-  async getRuntimeLogs(projectName: string, limit: number = 100, since?: number) {
+  async getRuntimeLogs(_projectName: string, _limit: number = 100, _since?: number) {
     logger.warn('getRuntimeLogs() called, but Vercel API does not provide runtime logs. Use Log Drains instead.');
     return [];
   }
@@ -389,7 +389,6 @@ export class VercelIntegration {
       if (deploymentDetails) {
         // Estimate CPU based on function invocations and average execution time
         // This is a simplified calculation
-        const functionInvocations = deploymentDetails.functionInvocations || 0;
         const avgExecutionTime = deploymentDetails.avgExecutionTime || 0;
         // Normalize to percentage (assuming max 1000ms per request = 100% CPU)
         cpuUsage = Math.min((avgExecutionTime / 10) || Math.random() * 30 + 20, 100);
@@ -431,12 +430,21 @@ export class VercelIntegration {
 
   /**
    * Trigger redeployment
+   * Note: Vercel's redeploy endpoint may not work for all deployments.
+   * For config fixes, it's better to commit changes to GitHub and let Vercel auto-deploy.
    */
   async redeploy(deploymentId: string) {
     try {
+      logger.info(`Attempting to redeploy deployment: ${deploymentId}`, {
+        teamId: this.teamId,
+        baseUrl: this.baseUrl,
+      });
+
       const url = this.teamId
         ? `${this.baseUrl}/v13/deployments/${deploymentId}/redeploy?teamId=${this.teamId}`
         : `${this.baseUrl}/v13/deployments/${deploymentId}/redeploy`;
+
+      logger.debug(`Redeploy URL: ${url}`);
 
       const response = await axios.post(url, {}, {
         headers: {
@@ -444,10 +452,21 @@ export class VercelIntegration {
         },
       });
 
-      logger.info(`Triggered redeploy for ${deploymentId}`);
+      logger.info(`✅ Triggered redeploy for ${deploymentId}`);
       return response.data;
     } catch (error: any) {
+      // Redeploy endpoint may return 404 if deployment doesn't exist or is too old
+      // This is expected - we should commit to GitHub instead and let Vercel auto-deploy
+      if (error.response?.status === 404) {
+        logger.warn(`⚠️ Redeploy endpoint returned 404 for deployment ${deploymentId}. This is normal - deployment may not exist or be too old.`);
+        logger.warn(`   Suggestion: Commit changes to GitHub instead and let Vercel auto-deploy.`);
+        throw new Error(`Deployment ${deploymentId} not found or cannot be redeployed. Please commit changes to GitHub for automatic deployment.`);
+      }
       logger.error('Error triggering redeploy:', error.message);
+      if (error.response) {
+        logger.error('Response status:', error.response.status);
+        logger.error('Response data:', error.response.data);
+      }
       throw error;
     }
   }

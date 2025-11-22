@@ -27,7 +27,7 @@ export class IncidentDetector {
     
     // If metadata is provided (from runtime monitor or webhook), use it
     if (this.metadata) {
-      const { source, projectName, errorMessage, errorCount, errors } = this.metadata;
+      const { source, projectName, errorMessage, errorCount } = this.metadata;
       
       // Create incident from runtime error
       const incident: Incident = {

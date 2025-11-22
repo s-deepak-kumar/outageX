@@ -45,18 +45,11 @@ router.post('/vercel', async (req: Request, res: Response) => {
 
     // Handle different event types
     switch (event.type) {
+      case 'deployment.created':
       case 'deployment.error':
       case 'deployment.failed':
-        logger.error(`Deployment failed: ${event.deployment?.url}`);
-        
-        // Trigger automatic incident response
-        await orchestrator.startIncidentResponse('demo-user', {
-          source: 'vercel_webhook',
-          deploymentId: event.deployment?.id,
-          deploymentUrl: event.deployment?.url,
-          error: event.deployment?.error,
-        });
-        
+        // BLOCKED: Deployment events are disabled for now
+        logger.debug(`Vercel deployment event blocked: ${event.type} (deployment events disabled)`);
         break;
 
       case 'deployment.ready':
@@ -174,17 +167,22 @@ router.post('/error-report', async (req: Request, res: Response) => {
       logger.error('❌ Socket.io not available in webhook handler! This should not happen.');
     }
 
-    // Extract file information from error
-    const filePath = error.filename || metadata?.sourceFile || metadata?.filename;
+    // Extract file information from error - prioritize actual source file
+    // Priority: error.source > metadata.source > error.filename > metadata.sourceFile > metadata.filename
+    const actualSource = error.source || metadata?.source;
+    const filePath = actualSource || error.filename || metadata?.sourceFile || metadata?.filename;
     const lineNumber = error.lineno || metadata?.sourceLine || metadata?.lineno;
     const columnNumber = error.colno || metadata?.sourceColumn || metadata?.colno;
 
     logger.info(`📋 Error file information:`, {
+      errorSource: error.source,
+      metadataSource: metadata?.source,
       filename: error.filename,
       lineno: error.lineno,
       colno: error.colno,
       extractedFilePath: metadata?.sourceFile,
       extractedLine: metadata?.sourceLine,
+      finalSource: actualSource,
       finalFilePath: filePath,
       finalLine: lineNumber,
       finalColumn: columnNumber,
@@ -201,11 +199,12 @@ router.post('/error-report', async (req: Request, res: Response) => {
       metadata: {
         ...metadata,
         ...error,
-        // Explicitly include file information
+        // CRITICAL: Preserve the actual source file path (not bundled file)
+        source: actualSource || filePath, // Actual source file from SDK
         filename: filePath, // Use extracted/actual filename
         lineno: lineNumber,
         colno: columnNumber,
-        sourceFile: filePath,
+        sourceFile: filePath, // Keep for backward compatibility
         sourceLine: lineNumber,
         sourceColumn: columnNumber,
       },

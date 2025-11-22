@@ -515,6 +515,7 @@ export class GitHubIntegration {
     }
 
     try {
+      logger.info(`Creating pull request: ${title} (${head} -> ${base})`);
       const response = await this.client.post(`/repos/${repoOwner}/${repoName}/pulls`, {
         title,
         head,
@@ -522,9 +523,22 @@ export class GitHubIntegration {
         body,
       });
       
-      logger.info(`Pull request created: ${response.data.html_url}`);
+      logger.info(`✅ Pull request created: ${response.data.html_url}`);
       return response.data;
-    } catch (error) {
+    } catch (error: any) {
+      // 422 usually means: branch doesn't exist, already has PR, or invalid data
+      if (error.response?.status === 422) {
+        const errorMessage = error.response?.data?.message || error.message;
+        logger.error(`❌ GitHub API 422 error creating PR:`, {
+          message: errorMessage,
+          errors: error.response?.data?.errors,
+          title,
+          head,
+          base,
+          bodyLength: body?.length,
+        });
+        throw new Error(`Failed to create PR: ${errorMessage}. Check if branch ${head} exists and has commits.`);
+      }
       logger.error('Error creating pull request:', error);
       throw error;
     }

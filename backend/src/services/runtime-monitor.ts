@@ -1,7 +1,7 @@
 import logger from '../utils/logger';
 import { db } from '../db';
 import { projects, runtimeLogs } from '../db/schema';
-import { eq, and, gte, desc } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import orchestrator from '../agent/orchestrator';
 import axios from 'axios';
 import { Server as SocketIOServer } from 'socket.io';
@@ -233,15 +233,53 @@ export class RuntimeMonitor {
         const latestError = errors[0];
         const errorMessage = latestError.message || 'Multiple runtime errors detected';
 
+        // Structure errors for orchestrator - preserve source field
+        // CRITICAL: The SDK sends "source" field which is the actual source file (e.g., "app/api/contact/route.ts")
+        // This is stored in err.metadata.source, NOT in err.metadata.sourceFile (which is the bundled file)
+        const structuredErrors = errors.slice(0, 10).map(err => {
+          // Get actual source file from metadata (this is what SDK sends)
+          const actualSource = err.metadata?.source; // e.g., "app/api/contact/route.ts"
+          const bundledFile = err.metadata?.sourceFile; // e.g., "var/task/.next/server/chunks/..."
+          
+          logger.info(`📋 Structuring error for orchestrator:`, {
+            actualSource: actualSource,
+            bundledFile: bundledFile,
+            willUse: actualSource || bundledFile || err.metadata?.filename,
+          });
+          
+          return {
+            message: err.message,
+            stack: err.metadata?.stack || err.stack,
+            filename: err.metadata?.filename || bundledFile,
+            lineno: err.metadata?.lineno || err.metadata?.sourceLine,
+            colno: err.metadata?.colno || err.metadata?.sourceColumn,
+            url: err.url,
+            // CRITICAL: Use actual source file (not bundled file) - this is what SDK sends
+            source: actualSource || err.metadata?.filename, // Prioritize actual source, fallback to filename
+            metadata: {
+              ...err.metadata,
+              // Ensure source is at top level of metadata for easy access
+              source: actualSource || err.metadata?.filename, // Actual source file from SDK
+              // Keep bundled file for reference but don't use it
+              sourceFile: bundledFile, // Keep for reference
+            },
+          };
+        });
+
+        // Get the actual source file from the first error (highest priority)
+        const actualSourceFile = structuredErrors[0]?.source || structuredErrors[0]?.metadata?.source;
+        
         // Trigger orchestrator with project info for autoFix check
         await orchestrator.startIncidentResponse(project.userId, {
-          source: 'runtime_monitor',
+          source: 'runtime_monitor', // Source of the incident (where it came from)
           projectId: project.id,
           projectName: project.vercelProjectName,
           deploymentId: latestError.deploymentId,
           errorCount: errorTracking.count,
           errorMessage: errorMessage,
-          errors: errors.slice(0, 10), // Include first 10 errors
+          errors: structuredErrors, // Include structured errors with source field
+          // CRITICAL: Add actual source file at top level for easy access in orchestrator
+          actualSourceFile: actualSourceFile, // Actual source file (e.g., "app/api/contact/route.ts")
           githubOwner: project.githubOwner,
           githubRepo: project.githubRepo,
         });
@@ -281,17 +319,25 @@ export class RuntimeMonitor {
         return;
       }
 
-      // Extract file information from metadata
-      const filePath = error.metadata?.filename || error.metadata?.sourceFile;
+      // Extract file information from metadata - prioritize actual source file
+      // Priority: metadata.source (from SDK) > metadata.sourceFile > metadata.filename
+      // The SDK sends "source" field which is the actual source file (e.g., "app/api/contact/route.ts")
+      const actualSourceFile = error.metadata?.source;
+      const filePath = actualSourceFile || error.metadata?.filename || error.metadata?.sourceFile;
       const lineNumber = error.metadata?.lineno || error.metadata?.sourceLine;
       const columnNumber = error.metadata?.colno || error.metadata?.sourceColumn;
 
       logger.info(`📄 Error file details:`, {
+        actualSource: actualSourceFile,
         filePath: filePath,
         lineNumber: lineNumber,
         columnNumber: columnNumber,
         hasStack: !!error.stack,
         stackPreview: error.stack ? error.stack.substring(0, 200) : 'No stack',
+        metadataKeys: error.metadata ? Object.keys(error.metadata) : [],
+        metadataSource: error.metadata?.source, // This should be "app/api/contact/route.ts"
+        metadataSourceFile: error.metadata?.sourceFile, // This might be bundled file
+        metadataFilename: error.metadata?.filename,
       });
 
       // Store error in database
@@ -305,14 +351,18 @@ export class RuntimeMonitor {
         metadata: {
           stack: error.stack,
           userAgent: error.userAgent,
+          // CRITICAL: Preserve actual source file (not bundled file)
+          source: actualSourceFile, // Actual source file from SDK
           // Explicitly include file information
           filename: filePath,
           lineno: lineNumber,
           colno: columnNumber,
-          sourceFile: filePath,
+          sourceFile: filePath, // Keep for backward compatibility
           sourceLine: lineNumber,
           sourceColumn: columnNumber,
           ...error.metadata,
+          // Override with actual source if available
+          ...(actualSourceFile && { source: actualSourceFile }),
         },
       };
 

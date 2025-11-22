@@ -35,6 +35,7 @@ export class AgentOrchestrator {
   private timeline: TimelineEntry[] = [];
   private isProcessing: boolean = false;
   private currentProject: typeof projects.$inferSelect | null = null;
+  private userId: string = 'demo-user';
 
   /**
    * Initialize with Socket.io server
@@ -48,6 +49,7 @@ export class AgentOrchestrator {
    * Start incident response pipeline
    */
   async startIncidentResponse(userId: string = 'demo-user', metadata?: Record<string, any>): Promise<void> {
+    this.userId = userId; // Store userId for use in other methods
     if (this.isProcessing) {
       logger.warn('Incident response already in progress');
       return;
@@ -383,40 +385,64 @@ export class AgentOrchestrator {
     logger.info(`🔍 Searching for file path in error metadata...`, {
       hasDetectionEntry: !!detectionEntry,
       hasMetadata: !!errorMetadata,
+      topLevelSource: errorMetadata?.source, // Check top-level source
       hasErrors: !!errorMetadata?.errors,
       errorsCount: errorMetadata?.errors?.length || 0,
       firstError: errorMetadata?.errors?.[0] ? {
+        hasSource: !!errorMetadata.errors[0].source,
+        source: errorMetadata.errors[0].source,
         hasFilename: !!errorMetadata.errors[0].filename,
         filename: errorMetadata.errors[0].filename,
         hasStack: !!errorMetadata.errors[0].stack,
         stackPreview: errorMetadata.errors[0].stack ? errorMetadata.errors[0].stack.substring(0, 300) : null,
         hasMetadata: !!errorMetadata.errors[0].metadata,
         metadataKeys: errorMetadata.errors[0].metadata ? Object.keys(errorMetadata.errors[0].metadata) : [],
+        metadataSource: errorMetadata.errors[0].metadata?.source,
       } : 'No first error',
     });
     
-    if (errorMetadata?.errors?.[0]) {
+    // Priority order for file path extraction (HIGHEST to LOWEST):
+    // 1. errorMetadata.actualSourceFile (top-level actual source file from SDK - HIGHEST PRIORITY)
+    // 2. errorMetadata.errors[0].source (source from first error)
+    // 3. errorMetadata.errors[0].metadata.source (source in error metadata)
+    // 4. errorMetadata.errors[0].metadata.sourceFile (extracted by SDK - may be bundled)
+    // 5. errorMetadata.errors[0].metadata.filename (from SDK)
+    // 6. errorMetadata.errors[0].filename (from error event)
+    // 7. Extract from stack trace
+    
+    // Check top-level actualSourceFile first (most reliable - this is what SDK sends)
+    if (errorMetadata?.actualSourceFile && !errorMetadata.actualSourceFile.includes('.next') && !errorMetadata.actualSourceFile.includes('node_modules')) {
+      filePath = errorMetadata.actualSourceFile;
+      logger.info(`✅ Found file path from errorMetadata.actualSourceFile (top-level, actual source file from SDK): ${filePath}`);
+    } else if (errorMetadata?.source && !errorMetadata.source.includes('.next') && !errorMetadata.source.includes('node_modules')) {
+      // Fallback to source if actualSourceFile not available
+      filePath = errorMetadata.source;
+      logger.info(`✅ Found file path from errorMetadata.source (top-level, actual source file): ${filePath}`);
+    } else if (errorMetadata?.errors?.[0]) {
       const firstError = errorMetadata.errors[0];
       
-      // Priority order for file path extraction:
-      // 1. metadata.sourceFile (extracted by SDK from stack trace)
-      // 2. metadata.filename (from SDK)
-      // 3. error.filename (from error event)
-      // 4. Extract from stack trace
-      
-      if (firstError.metadata?.sourceFile) {
+      if (firstError.source && !firstError.source.includes('.next') && !firstError.source.includes('node_modules')) {
+        // Use source field if it's not a bundled file
+        filePath = firstError.source;
+        logger.info(`✅ Found file path from error.source (actual source file): ${filePath}`);
+      } else if (firstError.metadata?.source && !firstError.metadata.source.includes('.next') && !firstError.metadata.source.includes('node_modules')) {
+        // Use metadata.source if it's not a bundled file
+        filePath = firstError.metadata.source;
+        logger.info(`✅ Found file path from error.metadata.source (actual source file): ${filePath}`);
+      } else if (firstError.metadata?.sourceFile && !firstError.metadata.sourceFile.includes('.next') && !firstError.metadata.sourceFile.includes('node_modules')) {
+        // Only use sourceFile if it's not a bundled file
         filePath = firstError.metadata.sourceFile;
         logger.info(`✅ Found file path from error.metadata.sourceFile (SDK extracted): ${filePath}`, {
           line: firstError.metadata.sourceLine,
           column: firstError.metadata.sourceColumn,
         });
-      } else if (firstError.metadata?.filename) {
+      } else if (firstError.metadata?.filename && !firstError.metadata.filename.includes('.next') && !firstError.metadata.filename.includes('node_modules')) {
         filePath = firstError.metadata.filename;
         logger.info(`✅ Found file path from error.metadata.filename: ${filePath}`, {
           line: firstError.metadata.lineno || firstError.metadata.sourceLine,
           column: firstError.metadata.colno || firstError.metadata.sourceColumn,
         });
-      } else if (firstError.filename) {
+      } else if (firstError.filename && !firstError.filename.includes('.next') && !firstError.filename.includes('node_modules')) {
         filePath = firstError.filename;
         logger.info(`✅ Found file path from error.filename: ${filePath}`, {
           line: firstError.lineno,
@@ -631,17 +657,21 @@ export class AgentOrchestrator {
                   logger.info(`✅ Found code file in root: ${filePath}`);
                   
                   try {
-                    const fileData = await github.getFileContent(
-                      filePath,
-                      'main',
-                      this.currentProject.githubOwner,
-                      this.currentProject.githubRepo
-                    );
-                    fileContent = fileData.content;
-                    logger.info(`✅ Successfully read ${filePath} from GitHub:`, {
-                      size: fileContent.length,
-                      sha: fileData.sha,
-                    });
+                    if (!filePath) {
+                      logger.warn('⚠️ No file path available to read');
+                    } else {
+                      const fileData = await github.getFileContent(
+                        filePath,
+                        'main',
+                        this.currentProject.githubOwner,
+                        this.currentProject.githubRepo
+                      );
+                      fileContent = fileData.content;
+                      logger.info(`✅ Successfully read ${filePath} from GitHub:`, {
+                        size: fileContent.length,
+                        sha: fileData.sha,
+                      });
+                    }
                   } catch (readError: any) {
                     logger.warn(`⚠️ Could not read found file ${filePath}: ${readError.message}`);
                   }
@@ -653,7 +683,7 @@ export class AgentOrchestrator {
               }
               
               // If still no file, try searching by filename
-              if (!fileContent) {
+              if (!fileContent && filePath) {
                 const fileName = filePath.split('/').pop() || filePath;
                 logger.info(`🔍 Searching repository for files matching: ${fileName}`);
                 
@@ -876,8 +906,8 @@ export class AgentOrchestrator {
     if (result.success) {
       this.updateTimelineEntry('execution', 'completed', { result });
       
-      const mergeMessage = result.merged 
-        ? `\n\n🚀 **PR Merged Automatically**\n\nPull request #${result.prNumber} has been created and merged.\n**Merge Commit:** ${result.mergeCommitSha?.substring(0, 7) || 'N/A'}`
+      const mergeMessage = (result as any).merged 
+        ? `\n\n🚀 **PR Merged Automatically**\n\nPull request #${(result as any).prNumber} has been created and merged.\n**Merge Commit:** ${(result as any).mergeCommitSha?.substring(0, 7) || 'N/A'}`
         : '';
       
       this.emitChatMessage(
