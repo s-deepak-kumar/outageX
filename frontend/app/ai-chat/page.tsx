@@ -153,7 +153,7 @@ export default function AIChatPage() {
   return (
     <>
       {/* Sticky Breadcrumb with Project Selector */}
-      <div className="sticky top-0 z-10 bg-background">
+      <div className="sticky top-0 z-10 bg-background ">
         <div className="h-[67.63px] bg-muted/50 rounded-lg border flex items-center justify-between p-6">
           <div className="flex items-center gap-4">
             <BreadcrumbList className="flex items-center gap-2">
