@@ -1,0 +1,20 @@
+{
+  "version": "5",
+  "dialect": "pg",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1763791378858,
+      "tag": "0000_material_juggernaut",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1763802845991,
+      "tag": "0001_ambitious_arclight",
+      "breakpoints": true
+    }
+  ]
+}
