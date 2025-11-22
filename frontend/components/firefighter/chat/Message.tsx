@@ -74,9 +74,10 @@ export function Message({ message }: MessageProps) {
           >
             <ReactMarkdown
               components={{
-                code: ({ node, inline, className, children, ...props }) => {
+                code: ({ node, className, children, ...props }: any) => {
                   const match = /language-(\w+)/.exec(className || '');
                   const codeString = String(children).replace(/\n$/, '');
+                  const inline = !className || !className.includes('language-');
 
                   if (!inline && match) {
                     return (

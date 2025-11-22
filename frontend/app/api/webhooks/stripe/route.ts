@@ -7,11 +7,37 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { STRIPE_PLANS } from "@/lib/constants/stripe";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
+// Lazy initialization to avoid build-time errors
+function getStripe() {
+  const apiKey = process.env.STRIPE_SECRET_KEY;
+  if (!apiKey) {
+    throw new Error("STRIPE_SECRET_KEY is not configured");
+  }
+  return new Stripe(apiKey);
+}
+
+function getWebhookSecret() {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    throw new Error("STRIPE_WEBHOOK_SECRET is not configured");
+  }
+  return secret;
+}
 
 export async function POST(request: Request) {
   try {
+    // Check if Stripe is configured
+    const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    
+    if (!stripeSecretKey || !webhookSecret) {
+      return NextResponse.json(
+        { error: "Stripe is not configured" },
+        { status: 503 }
+      );
+    }
+
+    const stripe = getStripe();
     const body = await request.text();
     const signature = headers().get("stripe-signature")!;
 

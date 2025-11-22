@@ -9,9 +9,14 @@ import { users } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
-const apiKey = process.env.STRIPE_SECRET_KEY!;
-
-const stripe = new Stripe(apiKey);
+// Lazy initialization to avoid build-time errors
+function getStripe() {
+  const apiKey = process.env.STRIPE_SECRET_KEY;
+  if (!apiKey) {
+    throw new Error("STRIPE_SECRET_KEY is not configured");
+  }
+  return new Stripe(apiKey);
+}
 
 const createStripeSessionSchema = z.object({
   priceId: z.string(),
@@ -28,6 +33,7 @@ export const postStripeSession = authenticatedAction
       .from(users)
       .where(eq(users.id, userId));
 
+    const stripe = getStripe();
     const session = await stripe.checkout.sessions.create({
       line_items: [
         {
@@ -59,6 +65,7 @@ export const createCustomerPortalSession = authenticatedAction.action(
       .where(eq(users.id, userId));
 
     // Get Stripe customer ID
+    const stripe = getStripe();
     const customer = await stripe.customers.list({
       email,
       limit: 1,

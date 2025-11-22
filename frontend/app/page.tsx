@@ -30,6 +30,9 @@ interface LiveLog {
   level: 'error' | 'warn' | 'info' | 'debug';
   message: string;
   source?: string;
+  url?: string;
+  metadata?: Record<string, any>;
+  stack?: string;
 }
 
 interface LiveIncident {
