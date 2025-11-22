@@ -33,7 +33,8 @@ export function getSocketIO(): SocketIOServer | null {
  * Note: No polling - errors come from SDK or manual log fetching
  */
 export class RuntimeMonitor {
-  private readonly ERROR_THRESHOLD = 1; // Trigger after 1 error (lowered for immediate incident creation)
+  // ERROR_THRESHOLD: Set to 1 to trigger incident immediately on first error
+  private readonly ERROR_THRESHOLD = 1;
   private errorCounts: Map<string, { count: number; firstError: Date }> = new Map(); // projectId -> error tracking
 
   /**

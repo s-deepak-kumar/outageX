@@ -42,13 +42,17 @@ interface TimelineEvent {
   title: string;
   description?: string;
   timestamp: string;
+  status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+  phase?: string;
   metadata?: any;
+  incidentId?: string;
 }
 
 interface Solution {
   id: string;
   type: string;
   description: string;
+  reasoning?: string;
   code?: string;
   confidence: number;
   executed: boolean;
@@ -93,6 +97,8 @@ export default function IncidentDetailPage() {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [loading, setLoading] = useState(true);
   const [liveLogs, setLiveLogs] = useState<Log[]>([]);
+  const [currentPhase, setCurrentPhase] = useState<{ phase: string; status: string; message: string } | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const isConnected = useFirefighterStore((state) => state.isConnected);
 
@@ -113,6 +119,15 @@ export default function IncidentDetailPage() {
             setTimeline(data.data.timeline || []);
             setSolutions(data.data.solutions || []);
             setCommits(data.data.commits || []);
+            
+            // Extract project ID from affected services
+            if (data.data.incident?.affectedServices && data.data.incident.affectedServices.length > 0) {
+              const firstService = data.data.incident.affectedServices[0];
+              setProjectId(firstService);
+              
+              // Fetch project logs
+              fetchProjectLogs(firstService);
+            }
           }
         }
       } catch (error) {
@@ -127,6 +142,50 @@ export default function IncidentDetailPage() {
     }
   }, [incidentId]);
 
+  // Fetch project logs
+  const fetchProjectLogs = async (projId: string) => {
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+      const since = Date.now() - (24 * 60 * 60 * 1000); // Last 24 hours
+      const params = new URLSearchParams({
+        type: 'runtime',
+        limit: '200',
+        since: since.toString(),
+      });
+
+      const res = await fetch(`${backendUrl}/api/projects/${projId}/logs?${params.toString()}`, {
+        headers: { 'x-user-id': 'demo-user' },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.data) {
+          const projectLogs = data.data.map((log: any) => ({
+            id: log.id || `log-${Date.now()}-${Math.random()}`,
+            timestamp: log.timestamp || log.created || new Date().toISOString(),
+            level: log.level || 'info',
+            message: log.message || JSON.stringify(log.metadata || {}),
+            service: log.source || 'system',
+            metadata: log.metadata,
+            stack: log.metadata?.stack || log.stack,
+          }));
+          
+          setLogs((prev) => {
+            const combined = [...prev, ...projectLogs];
+            const unique = combined.filter((log, index, self) => 
+              index === self.findIndex((l) => l.id === log.id)
+            );
+            return unique.sort((a, b) => 
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            );
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch project logs:', error);
+    }
+  };
+
   // Setup socket for live updates
   useEffect(() => {
     const socket = getSocket() || initializeSocket();
@@ -135,33 +194,102 @@ export default function IncidentDetailPage() {
       if (!data.logs || !Array.isArray(data.logs)) return;
       
       const newLogs = data.logs
-        .filter((log: any) => log.projectId || log.incidentId === incidentId)
+        .filter((log: any) => {
+          // Match by projectId if we have it, or by incidentId, or show all if no filter
+          if (projectId && log.projectId === projectId) return true;
+          if (log.incidentId === incidentId) return true;
+          // If no projectId set yet, show all logs (will be filtered once projectId is known)
+          if (!projectId) return true;
+          return false;
+        })
         .map((log: any) => ({
-          id: log.id || `log-${Date.now()}`,
+          id: log.id || `log-${Date.now()}-${Math.random()}`,
           timestamp: log.timestamp || new Date().toISOString(),
           level: log.level || 'info',
           message: log.message || JSON.stringify(log.metadata || {}),
-          service: log.source || 'system',
+          service: log.source || log.projectName || 'system',
           metadata: log.metadata,
+          stack: log.stack || log.metadata?.stack,
         }));
       
       if (newLogs.length > 0) {
         setLiveLogs((prev) => {
-          const existingIds = new Set(prev.map(l => l.id));
-          const unique = newLogs.filter(l => !existingIds.has(l.id));
-          return [...prev, ...unique].slice(-200);
+          const existingIds = new Set(prev.map((l: Log) => l.id));
+          const unique = newLogs.filter((l: Log) => !existingIds.has(l.id));
+          const combined = [...prev, ...unique];
+          // Sort by timestamp ascending (oldest first, newest at bottom)
+          const sorted = combined.sort((a, b) => 
+            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+          );
+          return sorted.slice(-200); // Keep last 200 logs
         });
       }
     };
 
     const handleTimelineAdd = (data: any) => {
-      if (data.entry && data.entry.incidentId === incidentId) {
-        setTimeline((prev) => [data.entry, ...prev]);
+      if (data.entry) {
+        const entry = data.entry;
+        // Match by incidentId or check if it's for this incident
+        if (entry.incidentId === incidentId || !entry.incidentId) {
+          setTimeline((prev) => {
+            // Check for duplicates
+            const existing = prev.find(e => e.id === entry.id);
+            if (existing) {
+              // Update existing entry
+              return prev.map(e => e.id === entry.id ? entry : e);
+            }
+            // Add new entry and sort by timestamp
+            const updated = [...prev, entry];
+            return updated.sort((a, b) => 
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            );
+          });
+        }
+      }
+    };
+
+    const handleAgentUpdate = (data: any) => {
+      if (data.phase && data.status && data.message) {
+        setCurrentPhase({
+          phase: data.phase,
+          status: data.status,
+          message: data.message,
+        });
+        
+        // Also add to timeline if not already present
+        setTimeline((prev) => {
+          const existing = prev.find(e => e.phase === data.phase && e.status === 'in_progress');
+          if (existing) {
+            return prev.map(e => 
+              e.id === existing.id 
+                ? { ...e, description: data.message, metadata: { ...e.metadata, ...data.data } }
+                : e
+            );
+          }
+          
+          // Add new timeline entry for this phase
+          const newEntry: TimelineEvent = {
+            id: `timeline-${Date.now()}-${Math.random()}`,
+            incidentId: incidentId,
+            type: 'agent_update',
+            phase: data.phase,
+            title: data.status,
+            description: data.message,
+            status: 'in_progress',
+            timestamp: new Date().toISOString(),
+            metadata: data.data,
+          };
+          
+          const updated = [...prev, newEntry];
+          return updated.sort((a, b) => 
+            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+          );
+        });
       }
     };
 
     const handleSolutionProposed = (data: any) => {
-      if (data.incidentId === incidentId || data.solution) {
+      if (data.solution) {
         // Refresh solutions
         fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001'}/api/incidents/${incidentId}`, {
           headers: { 'x-user-id': 'demo-user' },
@@ -175,16 +303,26 @@ export default function IncidentDetailPage() {
       }
     };
 
+    const handleStatusChange = (data: any) => {
+      if (data.incident && data.incident.id === incidentId) {
+        setIncident((prev) => prev ? { ...prev, status: data.incident.status } : null);
+      }
+    };
+
     socket.on('logs:stream', handleLogsStream);
     socket.on('timeline:add', handleTimelineAdd);
+    socket.on('agent:update', handleAgentUpdate);
     socket.on('solution:proposed', handleSolutionProposed);
+    socket.on('status:change', handleStatusChange);
 
     return () => {
       socket.off('logs:stream', handleLogsStream);
       socket.off('timeline:add', handleTimelineAdd);
+      socket.off('agent:update', handleAgentUpdate);
       socket.off('solution:proposed', handleSolutionProposed);
+      socket.off('status:change', handleStatusChange);
     };
-  }, [incidentId]);
+  }, [incidentId, projectId]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -333,33 +471,91 @@ export default function IncidentDetailPage() {
                 Investigation Timeline
               </CardTitle>
               <CardDescription>
-                Real-time process status
+                {currentPhase ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {currentPhase.phase.replace('_', ' ')}: {currentPhase.message}
+                  </span>
+                ) : (
+                  'Real-time process status'
+                )}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {timeline.length === 0 ? (
+              {timeline.length === 0 && !currentPhase ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Clock className="h-12 w-12 mx-auto mb-4 opacity-50" />
                   <p>No timeline events yet</p>
+                  <p className="text-xs mt-2">Waiting for process to start...</p>
                 </div>
               ) : (
                 <ScrollArea className="h-[600px]">
                   <div className="space-y-4">
+                    {/* Show current phase if active */}
+                    {currentPhase && (
+                      <div className="p-3 border rounded-lg bg-blue-500/10 border-blue-500/20">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                          <span className="font-semibold text-sm">
+                            {currentPhase.phase.replace('_', ' ').toUpperCase()}
+                          </span>
+                          <Badge variant="outline" className="text-xs">In Progress</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{currentPhase.message}</p>
+                      </div>
+                    )}
+                    
                     {timeline.map((event, index) => {
                       const isLast = index === timeline.length - 1;
+                      const status = event.status || 'completed';
+                      const phase = event.phase || event.type;
+                      
+                      // Status icons
+                      const StatusIcon = status === 'completed' ? CheckCircle2 :
+                                       status === 'in_progress' ? Loader2 :
+                                       status === 'failed' ? XCircle : Clock;
+                      
+                      // Status colors
+                      const statusColor = status === 'completed' ? 'text-green-600 dark:text-green-400' :
+                                         status === 'in_progress' ? 'text-blue-600 dark:text-blue-400' :
+                                         status === 'failed' ? 'text-red-600 dark:text-red-400' :
+                                         'text-muted-foreground';
+                      
                       return (
                         <div key={event.id} className="flex gap-3 relative">
                           {!isLast && (
                             <div className="absolute left-5 top-10 bottom-0 w-0.5 bg-border" />
                           )}
                           <div className="flex-shrink-0 mt-1">
-                            <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                              <Clock className="h-5 w-5 text-primary" />
-                            </div>
+                            {status === 'in_progress' ? (
+                              <Loader2 className={`h-10 w-10 ${statusColor} animate-spin`} />
+                            ) : (
+                              <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                                status === 'completed' ? 'bg-green-500/10' :
+                                status === 'failed' ? 'bg-red-500/10' :
+                                'bg-muted/50'
+                              }`}>
+                                <StatusIcon className={`h-5 w-5 ${statusColor}`} />
+                              </div>
+                            )}
                           </div>
                           <div className="flex-1 pb-4">
-                            <div className="flex items-center gap-2 mb-1">
-                              <Badge variant="outline">{event.type}</Badge>
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              {phase && (
+                                <Badge variant="secondary" className="text-xs">
+                                  {phase.replace('_', ' ')}
+                                </Badge>
+                              )}
+                              <Badge 
+                                variant={
+                                  status === 'completed' ? 'default' :
+                                  status === 'in_progress' ? 'outline' :
+                                  'destructive'
+                                }
+                                className="text-xs"
+                              >
+                                {status.replace('_', ' ')}
+                              </Badge>
                               <span className="text-xs text-muted-foreground">
                                 {format(new Date(event.timestamp), 'MMM d, HH:mm:ss')}
                               </span>
@@ -367,6 +563,16 @@ export default function IncidentDetailPage() {
                             <h4 className="font-medium mb-1">{event.title}</h4>
                             {event.description && (
                               <p className="text-sm text-muted-foreground">{event.description}</p>
+                            )}
+                            {event.metadata && Object.keys(event.metadata).length > 0 && (
+                              <details className="mt-2">
+                                <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                                  View Details
+                                </summary>
+                                <pre className="mt-1 text-xs text-muted-foreground bg-muted/50 p-2 rounded overflow-x-auto">
+                                  {JSON.stringify(event.metadata, null, 2)}
+                                </pre>
+                              </details>
                             )}
                           </div>
                         </div>
@@ -434,7 +640,9 @@ export default function IncidentDetailPage() {
                           )}
                         </div>
                         <h3 className="font-semibold mb-1">{solution.description}</h3>
-                        <p className="text-sm text-muted-foreground">{solution.reasoning}</p>
+                        {solution.reasoning && (
+                          <p className="text-sm text-muted-foreground">{solution.reasoning}</p>
+                        )}
                       </div>
                     </div>
 

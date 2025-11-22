@@ -37,6 +37,7 @@ interface LogEntry {
   message: string;
   source?: string;
   url?: string;
+  stack?: string;
   metadata?: Record<string, any>;
 }
 

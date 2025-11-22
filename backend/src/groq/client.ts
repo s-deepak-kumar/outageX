@@ -59,15 +59,100 @@ export class GroqClient {
 
   /**
    * Parse JSON response from AI (extracts and parses JSON)
+   * Handles control characters in string values by escaping them properly
    */
   private parseJSONResponse(content: string): any {
     try {
-      const jsonString = this.extractJSON(content);
+      let jsonString = this.extractJSON(content);
+      
+      // First, try to parse as-is
       return JSON.parse(jsonString);
     } catch (error: any) {
-      logger.error('Error parsing JSON response:', error);
-      logger.debug('Raw content:', content);
-      return {};
+      logger.warn('Initial JSON parse failed, attempting to fix control characters:', error.message);
+      logger.debug('Raw content (first 1000 chars):', content.substring(0, 1000));
+      
+      try {
+        let jsonString = this.extractJSON(content);
+        
+        // Fix control characters in string values by properly escaping them
+        // This regex finds string values and escapes unescaped control characters
+        let fixed = '';
+        let inString = false;
+        let escapeNext = false;
+        
+        for (let i = 0; i < jsonString.length; i++) {
+          const char = jsonString[i];
+          
+          if (escapeNext) {
+            fixed += char;
+            escapeNext = false;
+            continue;
+          }
+          
+          if (char === '\\') {
+            fixed += char;
+            escapeNext = true;
+            continue;
+          }
+          
+          if (char === '"') {
+            inString = !inString;
+            fixed += char;
+            continue;
+          }
+          
+          if (inString) {
+            // Inside a string - escape control characters
+            if (char === '\n') {
+              fixed += '\\n';
+            } else if (char === '\r') {
+              fixed += '\\r';
+            } else if (char === '\t') {
+              fixed += '\\t';
+            } else if (char === '\f') {
+              fixed += '\\f';
+            } else if (char === '\b') {
+              fixed += '\\b';
+            } else if (/[\x00-\x1F\x7F]/.test(char)) {
+              // Escape other control characters as \uXXXX
+              const code = char.charCodeAt(0);
+              fixed += `\\u${code.toString(16).padStart(4, '0')}`;
+            } else {
+              fixed += char;
+            }
+          } else {
+            fixed += char;
+          }
+        }
+        
+        logger.debug('Fixed JSON (first 500 chars):', fixed.substring(0, 500));
+        return JSON.parse(fixed);
+      } catch (fallbackError: any) {
+        logger.error('Failed to parse JSON even after fixing control characters:', fallbackError);
+        logger.debug('Extracted JSON (first 500 chars):', this.extractJSON(content).substring(0, 500));
+        
+        // Last resort: try to extract just the essential fields manually
+        try {
+          const jsonString = this.extractJSON(content);
+          const descriptionMatch = jsonString.match(/"description"\s*:\s*"([^"]*)"/);
+          const codeMatch = jsonString.match(/"code"\s*:\s*"([^"]*)"/);
+          const typeMatch = jsonString.match(/"type"\s*:\s*"([^"]*)"/);
+          const confidenceMatch = jsonString.match(/"confidence"\s*:\s*(\d+)/);
+          
+          return {
+            type: typeMatch ? typeMatch[1] : 'patch',
+            description: descriptionMatch ? descriptionMatch[1] : 'Solution generated',
+            code: codeMatch ? codeMatch[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t') : '',
+            confidence: confidenceMatch ? parseInt(confidenceMatch[1]) : 75,
+            risk: 'medium',
+            estimatedTime: '5 minutes',
+            steps: [],
+          };
+        } catch (extractError) {
+          logger.error('Failed to extract fields manually:', extractError);
+          return {};
+        }
+      }
     }
   }
 
@@ -276,7 +361,11 @@ CRITICAL REQUIREMENTS:
 4. DO NOT return text descriptions like "Optimized code will be provided" - return ACTUAL CODE
 5. The code must be valid, compilable code in the same language as the original file
 
-Generate a solution in JSON format. Return ONLY valid JSON, no markdown, no explanatory text, no code blocks. Just the JSON object:
+Generate a solution in JSON format. Return ONLY valid JSON, no markdown, no explanatory text, no code blocks. Just the JSON object.
+
+IMPORTANT: The "code" field must contain properly escaped JSON. All newlines must be escaped as \\n, tabs as \\t, etc.
+Example: "code": "function test() {\\n  return true;\\n}"
+
 {
   "type": "patch|rollback|config_fix|restart",
   "description": "Brief description",
@@ -285,7 +374,7 @@ Generate a solution in JSON format. Return ONLY valid JSON, no markdown, no expl
   "confidence": 0-100,
   "estimatedTime": "e.g., 2 minutes",
   "steps": ["step 1", "step 2"],
-  "code": "COMPLETE FIXED FILE CONTENT - must be actual code, not description"
+  "code": "COMPLETE FIXED FILE CONTENT with properly escaped newlines (\\n) and tabs (\\t)"
 }`;
 
       const response = await this.getClient().chat.completions.create({

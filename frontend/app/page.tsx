@@ -131,8 +131,8 @@ export default function DashboardPage() {
       // Add to local state (ascending order: oldest first, newest at bottom)
       setLiveLogs((prev) => {
         // Filter out duplicates
-        const existingIds = new Set(prev.map(l => l.id));
-        const uniqueNewLogs = newLogs.filter(l => !existingIds.has(l.id));
+        const existingIds = new Set(prev.map((l: LiveLog) => l.id));
+        const uniqueNewLogs = newLogs.filter((l: LiveLog) => !existingIds.has(l.id));
         
         console.log('🔄 Dashboard: Adding', uniqueNewLogs.length, 'unique logs (prev:', prev.length, ')');
         
@@ -249,40 +249,43 @@ export default function DashboardPage() {
     socket.on('status:change', handleStatusChange);
 
     // Also sync with store logs (backup in case socket misses some)
-    const storeUnsubscribe = useFirefighterStore.subscribe(
-      (state) => state.logs,
-      (storeLogs) => {
-        if (storeLogs && storeLogs.length > 0) {
-          console.log('📦 Dashboard: Syncing', storeLogs.length, 'logs from store');
-          const newLogs = storeLogs.map((log: any) => ({
-            id: log.id || `log-${Date.now()}-${Math.random()}`,
-            projectId: log.projectId,
-            projectName: log.projectName || 'Unknown',
-            timestamp: log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp),
-            level: (log.level || 'info') as 'error' | 'warn' | 'info' | 'debug',
-            message: log.message || JSON.stringify(log.metadata || {}),
-            source: log.source || 'store',
-            metadata: log.metadata || {},
-          }));
+    let previousStoreLogsLength = 0;
+    const storeUnsubscribe = useFirefighterStore.subscribe((state) => {
+      const storeLogs = state.logs;
+      // Only process if logs have changed
+      if (storeLogs && storeLogs.length > previousStoreLogsLength) {
+        const newStoreLogs = storeLogs.slice(previousStoreLogsLength);
+        previousStoreLogsLength = storeLogs.length;
+        
+        console.log('📦 Dashboard: Syncing', newStoreLogs.length, 'logs from store');
+        const newLogs = newStoreLogs.map((log: any) => ({
+          id: log.id || `log-${Date.now()}-${Math.random()}`,
+          projectId: log.projectId,
+          projectName: log.projectName || 'Unknown',
+          timestamp: log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp),
+          level: (log.level || 'info') as 'error' | 'warn' | 'info' | 'debug',
+          message: log.message || JSON.stringify(log.metadata || {}),
+          source: log.source || 'store',
+          metadata: log.metadata || {},
+        }));
 
-          setLiveLogs((prev) => {
-            const existingIds = new Set(prev.map(l => l.id));
-            const uniqueNewLogs = newLogs.filter(l => !existingIds.has(l.id));
-            if (uniqueNewLogs.length === 0) return prev;
-            
-            console.log('📦 Dashboard: Adding', uniqueNewLogs.length, 'logs from store');
-            
-            const combined = [...prev, ...uniqueNewLogs];
-            const sorted = combined.sort((a, b) => {
-              const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
-              const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
-              return timeA - timeB;
-            });
-            return sorted.slice(-500);
+        setLiveLogs((prev) => {
+          const existingIds = new Set(prev.map((l: LiveLog) => l.id));
+          const uniqueNewLogs = newLogs.filter((l: LiveLog) => !existingIds.has(l.id));
+          if (uniqueNewLogs.length === 0) return prev;
+          
+          console.log('📦 Dashboard: Adding', uniqueNewLogs.length, 'logs from store');
+          
+          const combined = [...prev, ...uniqueNewLogs];
+          const sorted = combined.sort((a, b) => {
+            const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+            const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+            return timeA - timeB;
           });
-        }
+          return sorted.slice(-500);
+        });
       }
-    );
+    });
 
     // Cleanup on unmount
     return () => {
