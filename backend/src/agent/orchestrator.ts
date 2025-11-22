@@ -6,7 +6,7 @@ import solutionSolver from './solver';
 import solutionExecutor from './executor';
 import logger from '../utils/logger';
 import { db } from '../db';
-import { projects } from '../db/schema';
+import { projects, incidents } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import {
   Incident,
@@ -203,13 +203,47 @@ export class AgentOrchestrator {
     await this.sleep(1500);
 
     const incident = await incidentDetector.detectIncident();
-    this.currentIncident = incident;
+    
+    // Store incident in database
+    try {
+      const userId = this.currentProject?.userId || 'demo-user';
+      const [savedIncident] = await db
+        .insert(incidents)
+        .values({
+          userId,
+          title: incident.title,
+          description: incident.description,
+          status: incident.status as any,
+          severity: incident.severity as any,
+          affectedServices: incident.affectedServices,
+          detectedAt: incident.startedAt,
+        })
+        .returning();
+      
+      // Update incident with database ID
+      this.currentIncident = {
+        ...incident,
+        id: savedIncident.id,
+      };
+      
+      logger.info(`✅ Incident stored in database: ${savedIncident.id}`);
+      
+      // Emit with database ID
+      this.emitIncidentDetected({
+        ...incident,
+        id: savedIncident.id,
+      });
+    } catch (error: any) {
+      logger.error('Failed to store incident in database:', error);
+      // Continue with in-memory incident
+      this.currentIncident = incident;
+      this.emitIncidentDetected(incident);
+    }
 
     this.updateTimelineEntry('detection', 'completed');
-    this.emitIncidentDetected(incident);
     this.emitChatMessage(
       'agent',
-      `🚨 **Incident Detected**\n\n**${incident.title}**\n\n${incident.description}\n\n**Severity:** ${incident.severity}\n**Affected Services:** ${incident.affectedServices.join(', ')}`
+      `🚨 **Incident Detected**\n\n**${this.currentIncident.title}**\n\n${this.currentIncident.description}\n\n**Severity:** ${this.currentIncident.severity}\n**Affected Services:** ${this.currentIncident.affectedServices.join(', ')}`
     );
 
     await this.sleep(1000);

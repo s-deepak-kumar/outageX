@@ -159,7 +159,20 @@ router.post('/error-report', async (req: Request, res: Response) => {
     });
 
     // Import runtime monitor
-    const runtimeMonitor = (await import('../services/runtime-monitor')).default;
+    const runtimeMonitorModule = await import('../services/runtime-monitor');
+    const runtimeMonitor = runtimeMonitorModule.default;
+    
+    // CRITICAL: Re-set socket.io instance in case module was cached before socket was initialized
+    // This ensures the socket is available even if the module was imported before index.ts set it
+    if (io) {
+      runtimeMonitorModule.setSocketIO(io);
+      logger.debug('✅ Re-set socket.io for runtime monitor in webhook handler', {
+        hasSocket: !!io,
+        socketConnected: io.sockets.sockets.size,
+      });
+    } else {
+      logger.error('❌ Socket.io not available in webhook handler! This should not happen.');
+    }
 
     // Extract file information from error
     const filePath = error.filename || metadata?.sourceFile || metadata?.filename;

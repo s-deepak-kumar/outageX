@@ -11,6 +11,14 @@ let io: SocketIOServer | null = null;
 
 export function setSocketIO(socketIO: SocketIOServer): void {
   io = socketIO;
+  logger.info('✅ Runtime Monitor: Socket.io instance set', {
+    hasSocket: !!io,
+    socketType: io ? 'SocketIOServer' : 'null',
+  });
+}
+
+export function getSocketIO(): SocketIOServer | null {
+  return io;
 }
 
 /**
@@ -25,7 +33,7 @@ export function setSocketIO(socketIO: SocketIOServer): void {
  * Note: No polling - errors come from SDK or manual log fetching
  */
 export class RuntimeMonitor {
-  private readonly ERROR_THRESHOLD = 3; // Trigger after 3 errors in 5 minutes
+  private readonly ERROR_THRESHOLD = 1; // Trigger after 1 error (lowered for immediate incident creation)
   private errorCounts: Map<string, { count: number; firstError: Date }> = new Map(); // projectId -> error tracking
 
   /**
@@ -319,7 +327,10 @@ export class RuntimeMonitor {
       logger.info(`✅ Stored error from SDK for project ${project.vercelProjectName}`);
       
       // Emit log via socket for real-time updates
-      if (io) {
+      // Re-check socket in case module was cached before socket was set
+      const currentSocket = io || getSocketIO();
+      
+      if (currentSocket) {
         const logForSocket = {
           id: insertedLog.id,
           projectId: insertedLog.projectId,
@@ -330,16 +341,17 @@ export class RuntimeMonitor {
           url: insertedLog.url,
           metadata: insertedLog.metadata,
         };
-        io.emit('logs:stream', { logs: [logForSocket] });
+        currentSocket.emit('logs:stream', { logs: [logForSocket] });
         logger.info(`📡 Emitted error log via socket for project ${project.id}`, {
           logId: logForSocket.id,
           projectId: project.id,
-          socketConnected: io.sockets.sockets.size,
+          socketConnected: currentSocket.sockets.sockets.size,
         });
       } else {
         logger.error('❌ Socket.io not available! This should not happen. Check initialization order.');
         logger.error('   Error log stored in DB but not emitted via socket.');
         logger.error('   Socket should be set in index.ts before services start.');
+        logger.error('   Current io value:', { io: io === null ? 'null' : 'exists', type: typeof io });
       }
 
       // Check if this triggers an incident

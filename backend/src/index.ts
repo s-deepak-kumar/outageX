@@ -127,7 +127,10 @@ const io = new SocketIOServer(httpServer, {
 // This must happen before initializeServices() to ensure socket is available when errors arrive
 setWebhooksSocketIO(io);
 setRuntimeMonitorSocketIO(io);
-logger.info('✅ Socket.io instance set for webhooks and runtime monitor');
+logger.info('✅ Socket.io instance set for webhooks and runtime monitor', {
+  hasSocket: !!io,
+  socketType: io ? 'SocketIOServer' : 'null',
+});
 
 /**
  * Initialize all services
