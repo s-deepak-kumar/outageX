@@ -386,108 +386,129 @@ export class AgentOrchestrator {
       hasDetectionEntry: !!detectionEntry,
       hasMetadata: !!errorMetadata,
       topLevelSource: errorMetadata?.source, // Check top-level source
+      topLevelActualSourceFile: errorMetadata?.actualSourceFile,
       hasErrors: !!errorMetadata?.errors,
       errorsCount: errorMetadata?.errors?.length || 0,
       firstError: errorMetadata?.errors?.[0] ? {
         hasSource: !!errorMetadata.errors[0].source,
-        source: errorMetadata.errors[0].source,
+        source: errorMetadata.errors[0].source, // THIS IS WHAT SDK SENDS - e.g., "app/api/contact/route.ts"
         hasFilename: !!errorMetadata.errors[0].filename,
         filename: errorMetadata.errors[0].filename,
         hasStack: !!errorMetadata.errors[0].stack,
         stackPreview: errorMetadata.errors[0].stack ? errorMetadata.errors[0].stack.substring(0, 300) : null,
         hasMetadata: !!errorMetadata.errors[0].metadata,
         metadataKeys: errorMetadata.errors[0].metadata ? Object.keys(errorMetadata.errors[0].metadata) : [],
-        metadataSource: errorMetadata.errors[0].metadata?.source,
+        metadataSource: errorMetadata.errors[0].metadata?.source, // Also check metadata.source
+        metadataSourceFile: errorMetadata.errors[0].metadata?.sourceFile, // Bundled file (should be ignored)
+        metadataFilename: errorMetadata.errors[0].metadata?.filename,
       } : 'No first error',
     });
     
     // Priority order for file path extraction (HIGHEST to LOWEST):
-    // 1. errorMetadata.actualSourceFile (top-level actual source file from SDK - HIGHEST PRIORITY)
-    // 2. errorMetadata.errors[0].source (source from first error)
-    // 3. errorMetadata.errors[0].metadata.source (source in error metadata)
-    // 4. errorMetadata.errors[0].metadata.sourceFile (extracted by SDK - may be bundled)
-    // 5. errorMetadata.errors[0].metadata.filename (from SDK)
-    // 6. errorMetadata.errors[0].filename (from error event)
-    // 7. Extract from stack trace
+    // CRITICAL: SDK sends "source" field at top level of error object (e.g., "app/api/contact/route.ts")
+    // 1. errorMetadata.errors[0].source (source from first error - SDK sends this directly)
+    // 2. errorMetadata.errors[0].metadata.source (source in error metadata)
+    // 3. errorMetadata.actualSourceFile (top-level actual source file from runtime monitor)
+    // 4. errorMetadata.source (top-level source)
+    // 5. errorMetadata.errors[0].metadata.sourceFile (extracted by SDK - may be bundled)
+    // 6. errorMetadata.errors[0].metadata.filename (from SDK)
+    // 7. errorMetadata.errors[0].filename (from error event)
+    // 8. Extract from stack trace
     
-    // Check top-level actualSourceFile first (most reliable - this is what SDK sends)
-    if (errorMetadata?.actualSourceFile && !errorMetadata.actualSourceFile.includes('.next') && !errorMetadata.actualSourceFile.includes('node_modules')) {
-      filePath = errorMetadata.actualSourceFile;
-      logger.info(`✅ Found file path from errorMetadata.actualSourceFile (top-level, actual source file from SDK): ${filePath}`);
-    } else if (errorMetadata?.source && !errorMetadata.source.includes('.next') && !errorMetadata.source.includes('node_modules')) {
-      // Fallback to source if actualSourceFile not available
-      filePath = errorMetadata.source;
-      logger.info(`✅ Found file path from errorMetadata.source (top-level, actual source file): ${filePath}`);
-    } else if (errorMetadata?.errors?.[0]) {
+    // CRITICAL: Check errors[0].source FIRST - this is what SDK sends directly
+    if (errorMetadata?.errors?.[0]) {
       const firstError = errorMetadata.errors[0];
       
-      if (firstError.source && !firstError.source.includes('.next') && !firstError.source.includes('node_modules')) {
-        // Use source field if it's not a bundled file
+      // Priority 1: error.source (SDK sends this directly at top level of error object)
+      if (firstError.source && !firstError.source.includes('.next') && !firstError.source.includes('node_modules') && !firstError.source.includes('var/task')) {
         filePath = firstError.source;
-        logger.info(`✅ Found file path from error.source (actual source file): ${filePath}`);
-      } else if (firstError.metadata?.source && !firstError.metadata.source.includes('.next') && !firstError.metadata.source.includes('node_modules')) {
-        // Use metadata.source if it's not a bundled file
-        filePath = firstError.metadata.source;
-        logger.info(`✅ Found file path from error.metadata.source (actual source file): ${filePath}`);
-      } else if (firstError.metadata?.sourceFile && !firstError.metadata.sourceFile.includes('.next') && !firstError.metadata.sourceFile.includes('node_modules')) {
-        // Only use sourceFile if it's not a bundled file
-        filePath = firstError.metadata.sourceFile;
-        logger.info(`✅ Found file path from error.metadata.sourceFile (SDK extracted): ${filePath}`, {
-          line: firstError.metadata.sourceLine,
-          column: firstError.metadata.sourceColumn,
-        });
-      } else if (firstError.metadata?.filename && !firstError.metadata.filename.includes('.next') && !firstError.metadata.filename.includes('node_modules')) {
-        filePath = firstError.metadata.filename;
-        logger.info(`✅ Found file path from error.metadata.filename: ${filePath}`, {
-          line: firstError.metadata.lineno || firstError.metadata.sourceLine,
-          column: firstError.metadata.colno || firstError.metadata.sourceColumn,
-        });
-      } else if (firstError.filename && !firstError.filename.includes('.next') && !firstError.filename.includes('node_modules')) {
-        filePath = firstError.filename;
-        logger.info(`✅ Found file path from error.filename: ${filePath}`, {
-          line: firstError.lineno,
-          column: firstError.colno,
-        });
+        logger.info(`✅ Found file path from error.source (SDK direct field - HIGHEST PRIORITY): ${filePath}`);
       }
-      // Try extracting from stack trace
-      else if (firstError.stack) {
-        logger.info(`🔍 Attempting to extract file path from stack trace...`);
-        logger.debug(`Stack trace (first 500 chars): ${firstError.stack.substring(0, 500)}`);
+      // Priority 2: error.metadata.source (SDK also puts it in metadata)
+      else if (firstError.metadata?.source && !firstError.metadata.source.includes('.next') && !firstError.metadata.source.includes('node_modules') && !firstError.metadata.source.includes('var/task')) {
+        filePath = firstError.metadata.source;
+        logger.info(`✅ Found file path from error.metadata.source (SDK metadata field): ${filePath}`);
+      }
+    }
+    
+    // If still no file path, check top-level metadata
+    if (!filePath) {
+      // Priority 3: errorMetadata.actualSourceFile (from runtime monitor)
+      if (errorMetadata?.actualSourceFile && !errorMetadata.actualSourceFile.includes('.next') && !errorMetadata.actualSourceFile.includes('node_modules') && !errorMetadata.actualSourceFile.includes('var/task')) {
+        filePath = errorMetadata.actualSourceFile;
+        logger.info(`✅ Found file path from errorMetadata.actualSourceFile (top-level from runtime monitor): ${filePath}`);
+      }
+      // Priority 4: errorMetadata.source (top-level)
+      else if (errorMetadata?.source && !errorMetadata.source.includes('.next') && !errorMetadata.source.includes('node_modules') && !errorMetadata.source.includes('var/task')) {
+        filePath = errorMetadata.source;
+        logger.info(`✅ Found file path from errorMetadata.source (top-level): ${filePath}`);
+      }
+      // Priority 5-7: Check other fields in firstError if available
+      else if (errorMetadata?.errors?.[0]) {
+        const firstError = errorMetadata.errors[0];
         
-        // Try multiple stack trace patterns
-        const patterns = [
-          /at .+ \((.+?):\d+:\d+\)/g,  // Standard: at function (file:line:col)
-          /\((.+?):\d+:\d+\)/g,         // Without function: (file:line:col)
-          /at (.+?):\d+:\d+/g,          // Without parentheses: at file:line:col
-          /(.+?\.(ts|tsx|js|jsx)):\d+/g, // Just file:line
-        ];
-        
-        for (const pattern of patterns) {
-          const matches = [...firstError.stack.matchAll(pattern)];
-          if (matches.length > 0) {
-            for (const match of matches) {
-              if (match[1]) {
-                let extractedPath = match[1];
-                // Remove webpack://, file://, http:// prefixes
-                extractedPath = extractedPath.replace(/^webpack:\/\/|^file:\/\/|^https?:\/\/[^/]+\//, '');
-                // Remove leading ./
-                extractedPath = extractedPath.replace(/^\.\//, '');
-                
-                // Only use if it looks like a valid file path
-                if (extractedPath.match(/\.(ts|tsx|js|jsx)$/)) {
-                  filePath = extractedPath;
-                  logger.info(`✅ Extracted file path from stack trace (pattern: ${pattern}): ${filePath}`);
-                  break;
-                }
+        if (firstError.metadata?.sourceFile && !firstError.metadata.sourceFile.includes('.next') && !firstError.metadata.sourceFile.includes('node_modules') && !firstError.metadata.sourceFile.includes('var/task')) {
+          // Only use sourceFile if it's not a bundled file
+          filePath = firstError.metadata.sourceFile;
+          logger.info(`✅ Found file path from error.metadata.sourceFile (SDK extracted): ${filePath}`, {
+            line: firstError.metadata.sourceLine,
+            column: firstError.metadata.sourceColumn,
+          });
+        } else if (firstError.metadata?.filename && !firstError.metadata.filename.includes('.next') && !firstError.metadata.filename.includes('node_modules') && !firstError.metadata.filename.includes('var/task')) {
+          filePath = firstError.metadata.filename;
+          logger.info(`✅ Found file path from error.metadata.filename: ${filePath}`, {
+            line: firstError.metadata.lineno || firstError.metadata.sourceLine,
+            column: firstError.metadata.colno || firstError.metadata.sourceColumn,
+          });
+        } else if (firstError.filename && !firstError.filename.includes('.next') && !firstError.filename.includes('node_modules') && !firstError.filename.includes('var/task')) {
+          filePath = firstError.filename;
+          logger.info(`✅ Found file path from error.filename: ${filePath}`, {
+            line: firstError.lineno,
+            column: firstError.colno,
+          });
+        }
+      }
+    }
+    
+    // Try extracting from stack trace if still no file path
+    if (!filePath && errorMetadata?.errors?.[0]?.stack) {
+      const firstError = errorMetadata.errors[0];
+      logger.info(`🔍 Attempting to extract file path from stack trace...`);
+      logger.debug(`Stack trace (first 500 chars): ${firstError.stack.substring(0, 500)}`);
+      
+      // Try multiple stack trace patterns
+      const patterns = [
+        /at .+ \((.+?):\d+:\d+\)/g,  // Standard: at function (file:line:col)
+        /\((.+?):\d+:\d+\)/g,         // Without function: (file:line:col)
+        /at (.+?):\d+:\d+/g,          // Without parentheses: at file:line:col
+        /(.+?\.(ts|tsx|js|jsx)):\d+/g, // Just file:line
+      ];
+      
+      for (const pattern of patterns) {
+        const matches = [...firstError.stack.matchAll(pattern)];
+        if (matches.length > 0) {
+          for (const match of matches) {
+            if (match[1]) {
+              let extractedPath = match[1];
+              // Remove webpack://, file://, http:// prefixes
+              extractedPath = extractedPath.replace(/^webpack:\/\/|^file:\/\/|^https?:\/\/[^/]+\//, '');
+              // Remove leading ./
+              extractedPath = extractedPath.replace(/^\.\//, '');
+              
+              // Only use if it looks like a valid file path and is not a bundled file
+              if (extractedPath.match(/\.(ts|tsx|js|jsx)$/) && !extractedPath.includes('.next') && !extractedPath.includes('node_modules') && !extractedPath.includes('var/task')) {
+                filePath = extractedPath;
+                logger.info(`✅ Extracted file path from stack trace: ${filePath}`);
+                break;
               }
             }
-            if (filePath) break;
           }
+          if (filePath) break;
         }
-        
-        if (!filePath) {
-          logger.warn(`⚠️ Could not extract file path from stack trace`);
-        }
+      }
+      
+      if (!filePath) {
+        logger.warn(`⚠️ Could not extract file path from stack trace`);
       }
     }
     
